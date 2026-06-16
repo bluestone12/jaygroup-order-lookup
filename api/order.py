@@ -3,10 +3,11 @@ import hmac
 import json
 import os
 import time
-from http.server import BaseHTTPRequestHandler
-from urllib.parse import parse_qs
 
 import requests
+from flask import Flask, Response, request
+
+app = Flask(__name__)
 
 API_BASE = "https://api.logistics.jaygroup.com"
 
@@ -36,13 +37,15 @@ ORDER_STATUS_LABELS = {
 }
 
 
-def verify_slack_signature(body: bytes, headers: dict) -> bool:
+def verify_slack_signature(body: bytes) -> bool:
     signing_secret = os.environ.get("SLACK_SIGNING_SECRET", "")
-    timestamp = headers.get("x-slack-request-timestamp", "")
-    signature = headers.get("x-slack-signature", "")
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
 
-    # Reject requests older than 5 minutes to prevent replay attacks.
-    if abs(time.time() - float(timestamp)) > 300:
+    try:
+        if abs(time.time() - float(timestamp)) > 300:
+            return False
+    except (ValueError, TypeError):
         return False
 
     base = f"v0:{timestamp}:{body.decode()}"
@@ -66,7 +69,6 @@ def get_access_token():
 
 
 def lookup_order(shopify_number: str):
-    """Search for an order by alternateOrderNumber (Shopify order number)."""
     token = get_access_token()
     resp = requests.post(
         f"{API_BASE}/orders/search",
@@ -87,17 +89,21 @@ def format_response(order) -> str:
     order_number = order.get("orderNumber")
     status = order.get("status", "")
     status_label = ORDER_STATUS_LABELS.get(status, status)
-    received = order.get("receivedDate", "")[:10]
+    received = (order.get("receivedDate") or "")[:10]
 
-    lines = [f":package: *Order {shopify}* (JayGroup: `{order_number}`) — received {received}"]
-    lines.append(f"*Stage:* {status_label}")
+    lines = [
+        f":package: *Order {shopify}* (JayGroup: `{order_number}`) — received {received}",
+        f"*Stage:* {status_label}",
+    ]
 
     fulfillments = order.get("fulfillments") or []
     if fulfillments:
         lines.append("")
         for i, f in enumerate(fulfillments, 1):
             prefix = f"*Fulfillment {i}:*" if len(fulfillments) > 1 else "*Fulfillment:*"
-            f_status = FULFILLMENT_STATUS_LABELS.get(f.get("fulfillmentStatus", ""), f.get("fulfillmentStatus", "?"))
+            f_status = FULFILLMENT_STATUS_LABELS.get(
+                f.get("fulfillmentStatus", ""), f.get("fulfillmentStatus", "?")
+            )
             tracking = f.get("tracking") or {}
             carrier = tracking.get("carrier") or ""
             tracking_number = tracking.get("trackingNumber") or ""
@@ -116,35 +122,28 @@ def format_response(order) -> str:
     return "\n".join(lines)
 
 
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
+def slack_response(text):
+    return Response(
+        json.dumps({"response_type": "ephemeral", "text": text}),
+        status=200,
+        mimetype="application/json",
+    )
 
-        if not verify_slack_signature(body, {k.lower(): v for k, v in self.headers.items()}):
-            self._respond(403, "Invalid signature")
-            return
 
-        params = parse_qs(body.decode())
-        shopify_number = (params.get("text") or [""])[0].strip()
+@app.route("/api/order", methods=["POST"])
+def handle():
+    body = request.get_data()
 
-        if not shopify_number:
-            text = ":x: Please provide a Shopify order number, e.g. `/order #1064`"
-        else:
-            try:
-                order = lookup_order(shopify_number)
-                text = format_response(order)
-            except Exception as e:
-                text = f":x: Error looking up order: {e}"
+    if not verify_slack_signature(body):
+        return Response("Invalid signature", status=403)
 
-        payload = json.dumps({"response_type": "ephemeral", "text": text})
-        self._respond(200, payload, content_type="application/json")
+    shopify_number = request.form.get("text", "").strip()
 
-    def _respond(self, status, body, content_type="text/plain"):
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.end_headers()
-        self.wfile.write(body.encode() if isinstance(body, str) else body)
+    if not shopify_number:
+        return slack_response(":x: Please provide a Shopify order number, e.g. `/order #1064`")
 
-    def log_message(self, *args):
-        pass
+    try:
+        order = lookup_order(shopify_number)
+        return slack_response(format_response(order))
+    except Exception as e:
+        return slack_response(f":x: Error looking up order: {e}")
