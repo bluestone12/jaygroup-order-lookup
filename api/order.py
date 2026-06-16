@@ -61,7 +61,7 @@ def lookup_order(shopify_number):
 
 def format_response(order):
     if not order:
-        return ":x: Order not found. Make sure to include the `#`, e.g. `/order #1064`"
+        return ":x: Order not found. Make sure to include the `#`, e.g. `/track #1064`"
 
     shopify = order.get("alternateOrderNumber") or "?"
     order_number = order.get("orderNumber")
@@ -115,7 +115,7 @@ class handler(BaseHTTPRequestHandler):
             shopify_number = params.get("text", "").strip()
 
             if not shopify_number:
-                text = ":x: Please provide a Shopify order number, e.g. `/order #1064`"
+                text = ":x: Please provide a Shopify order number, e.g. `/track #1064`"
             else:
                 try:
                     order = lookup_order(shopify_number)
