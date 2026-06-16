@@ -1,13 +1,8 @@
-import hashlib
-import hmac
 import json
 import os
-import time
+from http.server import BaseHTTPRequestHandler
 
 import requests
-from flask import Flask, Response, request
-
-app = Flask(__name__)
 
 API_BASE = "https://api.logistics.jaygroup.com"
 
@@ -37,24 +32,6 @@ ORDER_STATUS_LABELS = {
 }
 
 
-def verify_slack_signature(body: bytes) -> bool:
-    signing_secret = os.environ.get("SLACK_SIGNING_SECRET", "")
-    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
-    signature = request.headers.get("X-Slack-Signature", "")
-
-    try:
-        if abs(time.time() - float(timestamp)) > 300:
-            return False
-    except (ValueError, TypeError):
-        return False
-
-    base = f"v0:{timestamp}:{body.decode()}"
-    expected = "v0=" + hmac.new(
-        signing_secret.encode(), base.encode(), hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(expected, signature)
-
-
 def get_access_token():
     resp = requests.post(
         f"{API_BASE}/oauth/token",
@@ -68,7 +45,7 @@ def get_access_token():
     return resp.json()["access_token"]
 
 
-def lookup_order(shopify_number: str):
+def lookup_order(shopify_number):
     token = get_access_token()
     resp = requests.post(
         f"{API_BASE}/orders/search",
@@ -81,7 +58,7 @@ def lookup_order(shopify_number: str):
     return results[0] if results else None
 
 
-def format_response(order) -> str:
+def format_response(order):
     if not order:
         return ":x: Order not found. Make sure to include the `#`, e.g. `/order #1064`"
 
@@ -122,30 +99,45 @@ def format_response(order) -> str:
     return "\n".join(lines)
 
 
-def slack_response(text):
-    return Response(
-        json.dumps({"response_type": "ephemeral", "text": text}),
-        status=200,
-        mimetype="application/json",
-    )
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
 
+            # Parse form data from Slack
+            params = {}
+            for part in body.split("&"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    params[k] = requests.utils.unquote(v.replace("+", " "))
 
-@app.route("/api/order", methods=["POST"])
-def handle():
-    body = request.get_data()
+            shopify_number = params.get("text", "").strip()
 
-    # Signature verification temporarily disabled for testing.
-    # TODO: re-enable before going to production.
-    # if not verify_slack_signature(body):
-    #     return Response("Invalid signature", status=403)
+            if not shopify_number:
+                text = ":x: Please provide a Shopify order number, e.g. `/order #1064`"
+            else:
+                try:
+                    order = lookup_order(shopify_number)
+                    text = format_response(order)
+                except Exception as e:
+                    text = f":x: Error looking up order: {e}"
 
-    shopify_number = request.form.get("text", "").strip()
+            payload = json.dumps({"response_type": "ephemeral", "text": text})
+            self._respond(200, payload, "application/json")
 
-    if not shopify_number:
-        return slack_response(":x: Please provide a Shopify order number, e.g. `/order #1064`")
+        except Exception as e:
+            self._respond(200,
+                json.dumps({"response_type": "ephemeral", "text": f":x: Unexpected error: {e}"}),
+                "application/json")
 
-    try:
-        order = lookup_order(shopify_number)
-        return slack_response(format_response(order))
-    except Exception as e:
-        return slack_response(f":x: Error looking up order: {e}")
+    def _respond(self, status, body, content_type="text/plain"):
+        encoded = body.encode("utf-8") if isinstance(body, str) else body
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, *args):
+        pass
