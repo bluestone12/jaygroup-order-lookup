@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/order.py": {
-      "runtime": "python3.12"
+      "runtime": "@vercel/python@4.3.1"
     }
   }
 }
