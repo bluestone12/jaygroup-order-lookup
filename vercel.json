@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/order.py": {
+      "runtime": "python3.12"
+    }
+  }
+}
